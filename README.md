@@ -150,20 +150,36 @@ O script detecta automaticamente o tipo de projeto:
 - **Rust** (`Cargo.toml`) - Sugere `cargo build`
 - **Go** (`go.mod`) - Sugere `go mod download`
 
-### Fuzzy Search
+### Menu Interativo com FZF
 
-O comando `p` suporta busca inteligente:
+O comando `p` oferece uma experiência interativa:
 
 ```bash
-# Match exato
+# Menu interativo (com fzf instalado)
+p
+# Mostra menu navegável com preview do README
+# ↑↓ para navegar, Enter para selecionar, Esc para sair
+
+# Busca direta por nome
 p meu-projeto-web
 
-# Match parcial
+# Busca parcial (case insensitive)
 p web              # Encontra "meu-projeto-web"
+p WEB              # Também funciona
 
-# Múltiplos resultados - mostra menu de escolha
-p app              # Lista todos com "app" no nome
+# Múltiplos resultados - menu fzf ou numerado
+p app              # Se achar vários, mostra menu para escolher
 ```
+
+**Com FZF instalado:**
+- Menu visual navegável com setas
+- Preview do README ao lado
+- Busca em tempo real
+- Interface moderna e rápida
+
+**Sem FZF:**
+- Funciona normalmente com menu numerado
+- Sugestão para instalar fzf para melhor experiência
 
 ### 🔒 Projeto Jail (Navegação Restrita)
 
@@ -216,8 +232,22 @@ export PROJECTS_ROOT="/seu/caminho/projetos"
 
 ## Requisitos
 
+**Obrigatórios:**
+- Bash 4.0+ ou Zsh 5.0+
 - Git (para importar repositórios)
-- Bash ou Zsh
+
+**Opcionais:**
+- [fzf](https://github.com/junegunn/fzf) - Para menu interativo (altamente recomendado)
+  ```bash
+  # Ubuntu/Debian
+  sudo apt install fzf
+
+  # macOS
+  brew install fzf
+
+  # Arch Linux
+  sudo pacman -S fzf
+  ```
 
 ## Licença
 

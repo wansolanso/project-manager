@@ -847,10 +847,57 @@ p() {
 
     local busca="$1"
 
-    # Se não passou argumento
+    # Se não passou argumento, mostrar menu interativo
     if [ -z "$busca" ]; then
-        echo -e "${BLUE}Projetos disponíveis:${NC}"
-        _projeto_listar
+        # Verificar se fzf está disponível
+        if command -v fzf &> /dev/null; then
+            echo -e "${BLUE}Selecione um projeto:${NC}"
+
+            # Coletar todos os projetos com seus tipos
+            local projetos=()
+            for dir in "$ACTIVE_DIR" "$PERSONAL_DIR" "$ARCHIVED_DIR"; do
+                if [ -d "$dir" ]; then
+                    local tipo=$(basename "$dir")
+                    for projeto_path in "$dir"/*; do
+                        [ -e "$projeto_path" ] || continue
+                        if [ -d "$projeto_path" ]; then
+                            local nome=$(basename "$projeto_path")
+                            projetos+=("$tipo/$nome")
+                        fi
+                    done
+                fi
+            done
+
+            if [ ${#projetos[@]} -eq 0 ]; then
+                echo -e "${YELLOW}Nenhum projeto encontrado${NC}"
+                echo -e "${BLUE}Crie um novo projeto com: projeto criar --nome${NC}"
+                return 1
+            fi
+
+            # Usar fzf para seleção
+            local projeto_selecionado=$(printf '%s\n' "${projetos[@]}" | fzf \
+                --height 40% \
+                --reverse \
+                --border \
+                --prompt="Projeto > " \
+                --preview 'tipo=$(echo {} | cut -d/ -f1); nome=$(echo {} | cut -d/ -f2); cat ~/projects/$tipo/$nome/README.md 2>/dev/null || echo "Sem README disponível"' \
+                --preview-window=right:60% \
+                --header="↑↓ navegar | Enter selecionar | Esc sair")
+
+            if [ -n "$projeto_selecionado" ]; then
+                local nome=$(echo "$projeto_selecionado" | cut -d'/' -f2)
+                _projeto_entrar "$nome"
+            else
+                echo -e "${YELLOW}Nenhum projeto selecionado${NC}"
+                return 1
+            fi
+        else
+            # Fallback: listar projetos se fzf não estiver disponível
+            echo -e "${BLUE}Projetos disponíveis:${NC}"
+            _projeto_listar
+            echo -e "\n${YELLOW}Dica: Instale 'fzf' para um menu interativo!${NC}"
+            echo -e "${BLUE}Use: p <nome-do-projeto> para entrar diretamente${NC}"
+        fi
         return 0
     fi
 
@@ -907,16 +954,35 @@ p() {
     # Se encontrou múltiplos
     if [ ${#encontrados[@]} -gt 1 ]; then
         echo -e "${YELLOW}Múltiplos projetos encontrados para '$busca':${NC}"
-        for i in "${!encontrados[@]}"; do
-            echo -e "  $((i+1))) ${encontrados[$i]}"
-        done
-        read -p "Escolha [1]: " escolha
-        escolha=${escolha:-1}
-        if [[ "$escolha" =~ ^[0-9]+$ ]] && [ "$escolha" -ge 1 ] && [ "$escolha" -le ${#encontrados[@]} ]; then
-            _projeto_entrar "${encontrados[$((escolha-1))]}"
+
+        # Usar fzf se disponível
+        if command -v fzf &> /dev/null; then
+            local escolhido=$(printf '%s\n' "${encontrados[@]}" | fzf \
+                --height 40% \
+                --reverse \
+                --border \
+                --prompt="Escolha > " \
+                --header="Encontrados: ${#encontrados[@]} projetos")
+
+            if [ -n "$escolhido" ]; then
+                _projeto_entrar "$escolhido"
+            else
+                echo -e "${YELLOW}Nenhum projeto selecionado${NC}"
+                return 1
+            fi
         else
-            echo -e "${RED}Escolha inválida${NC}"
-            return 1
+            # Fallback: menu numerado
+            for i in "${!encontrados[@]}"; do
+                echo -e "  $((i+1))) ${encontrados[$i]}"
+            done
+            read -p "Escolha [1]: " escolha
+            escolha=${escolha:-1}
+            if [[ "$escolha" =~ ^[0-9]+$ ]] && [ "$escolha" -ge 1 ] && [ "$escolha" -le ${#encontrados[@]} ]; then
+                _projeto_entrar "${encontrados[$((escolha-1))]}"
+            else
+                echo -e "${RED}Escolha inválida${NC}"
+                return 1
+            fi
         fi
         return 0
     fi
