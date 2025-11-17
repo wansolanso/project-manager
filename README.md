@@ -6,6 +6,7 @@ Um sistema completo de gerenciamento de projetos para terminal (Bash/Zsh).
 
 - **Organização automática** - Separa projetos em active, personal e archived
 - **Navegação rápida** - Entre em projetos com `p nome` ou `projeto --nome`
+- **🔒 Projeto Jail** - Quando dentro de um projeto, impossível navegar para fora (segurança)
 - **Importação Git** - Clone repositórios direto para sua estrutura
 - **Ambientes isolados** - Suporte automático para venv, nvm e variáveis de ambiente
 - **Autocompletion** - Funciona em Bash e Zsh
@@ -163,6 +164,39 @@ p web              # Encontra "meu-projeto-web"
 # Múltiplos resultados - mostra menu de escolha
 p app              # Lista todos com "app" no nome
 ```
+
+### 🔒 Projeto Jail (Navegação Restrita)
+
+Quando você entra em um projeto, o sistema ativa automaticamente o "jail mode", impedindo que você navegue para fora do diretório do projeto:
+
+```bash
+# Entrar no projeto
+projeto --meu-app
+# 🔒 Navegação restrita ao projeto (use 'projeto sair' para sair)
+
+# Tentar sair do projeto com cd
+cd ~
+# ✗ Não é possível navegar para fora do projeto 'meu-app'
+# Use 'projeto sair' para sair do projeto
+
+cd ../outro-projeto
+# ✗ Caminho bloqueado: ../outro-projeto
+
+# Dentro do projeto, navegação normal
+cd src/          # ✓ OK
+cd ../tests/     # ✓ OK
+cd ..            # ✓ OK (volta para raiz do projeto)
+
+# Sair corretamente
+projeto sair
+# ✓ Saiu do projeto: meu-app
+# 🔓 Navegação livre restaurada
+```
+
+**Por que isso é útil?**
+- **Segurança**: Previne comandos destrutivos acidentais fora do projeto
+- **Foco**: Mantém você dentro do contexto do projeto
+- **Isolamento**: Evita operações em arquivos fora do escopo do projeto
 
 ## Configuração
 
