@@ -317,10 +317,7 @@ ENVEOF
 
     # Inicializar git
     if command -v git &> /dev/null; then
-        cd "$projeto_dir"
-        git init -q
-        git add .
-        git commit -q -m "Initial commit: projeto $nome"
+        (cd "$projeto_dir" && git init -q && git add . && git commit -q -m "Initial commit: projeto $nome")
         echo -e "${GREEN}Repositório git inicializado${NC}"
     fi
 
@@ -330,8 +327,7 @@ ENVEOF
     # Perguntar se quer entrar
     read -p "Entrar no projeto agora? [S/n]: " entrar
     if [[ "${entrar:-s}" =~ ^[Ss]$ ]]; then
-        cd "$projeto_dir"
-        source .projeto-env
+        _projeto_entrar "$nome"
     fi
 }
 
@@ -430,8 +426,12 @@ _projeto_entrar() {
         fi
     fi
 
-    # Entrar no projeto
-    cd "$projeto_dir"
+    # Marcar que está em um projeto (antes de entrar, para o jail funcionar)
+    export PROJETO_ATUAL="$nome_encontrado"
+    export PROJETO_ATUAL_PATH="$projeto_dir"
+
+    # Entrar no projeto (usando builtin para evitar jail durante entrada)
+    builtin cd "$projeto_dir"
 
     # Carregar ambiente se existir
     if [ -f ".projeto-env" ]; then
@@ -451,10 +451,6 @@ _projeto_entrar() {
         echo -e "${BLUE}Git:${NC}"
         git status -sb 2>/dev/null || true
     fi
-
-    # Marcar que está em um projeto
-    export PROJETO_ATUAL="$nome_encontrado"
-    export PROJETO_ATUAL_PATH="$projeto_dir"
 
     # Ativar jail para restringir navegação
     _projeto_ativar_jail
@@ -796,10 +792,7 @@ ENVEOF
     echo ""
     read -p "Entrar no projeto agora? [S/n]: " entrar
     if [[ "${entrar:-s}" =~ ^[Ss]$ ]]; then
-        cd "$projeto_dir"
-        if [ -f ".projeto-env" ]; then
-            source .projeto-env
-        fi
+        _projeto_entrar "$repo_name"
     fi
 }
 
@@ -848,6 +841,8 @@ EOF
 # ============================================
 
 p() {
+    _projeto_init
+
     [ -n "$ZSH_VERSION" ] && setopt local_options KSH_ARRAYS
 
     local busca="$1"
@@ -861,6 +856,7 @@ p() {
 
     # Buscar projeto
     local encontrados=()
+    local encontrados_paths=()
     local exato=""
 
     if [ -n "$BASH_VERSION" ]; then
@@ -882,9 +878,13 @@ p() {
                         break 2
                     fi
 
-                    # Match parcial
-                    if [[ "$projeto_nome" == *"$busca"* ]]; then
+                    # Match parcial (case insensitive)
+                    local busca_lower=$(echo "$busca" | tr '[:upper:]' '[:lower:]')
+                    local projeto_lower=$(echo "$projeto_nome" | tr '[:upper:]' '[:lower:]')
+
+                    if [[ "$projeto_lower" == *"$busca_lower"* ]]; then
                         encontrados+=("$projeto_nome")
+                        encontrados_paths+=("$projeto_path")
                     fi
                 fi
             done
@@ -906,7 +906,7 @@ p() {
 
     # Se encontrou múltiplos
     if [ ${#encontrados[@]} -gt 1 ]; then
-        echo -e "${YELLOW}Múltiplos projetos encontrados:${NC}"
+        echo -e "${YELLOW}Múltiplos projetos encontrados para '$busca':${NC}"
         for i in "${!encontrados[@]}"; do
             echo -e "  $((i+1))) ${encontrados[$i]}"
         done
@@ -914,13 +914,18 @@ p() {
         escolha=${escolha:-1}
         if [[ "$escolha" =~ ^[0-9]+$ ]] && [ "$escolha" -ge 1 ] && [ "$escolha" -le ${#encontrados[@]} ]; then
             _projeto_entrar "${encontrados[$((escolha-1))]}"
+        else
+            echo -e "${RED}Escolha inválida${NC}"
+            return 1
         fi
         return 0
     fi
 
     # Não encontrou nada
     echo -e "${RED}Projeto não encontrado: $busca${NC}"
+    echo -e "${BLUE}Projetos disponíveis:${NC}"
     _projeto_listar
+    return 1
 }
 
 # ============================================
