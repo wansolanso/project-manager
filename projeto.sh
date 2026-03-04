@@ -26,6 +26,9 @@ ACTIVE_DIR="$PROJECTS_ROOT/active"
 ARCHIVED_DIR="$PROJECTS_ROOT/archived"
 PERSONAL_DIR="$PROJECTS_ROOT/personal"
 
+# Comprimento máximo de nome de projeto
+_PROJETO_NOME_MAX=64
+
 # Cores para output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -44,18 +47,159 @@ _projeto_init() {
 }
 
 # ============================================
+# SANITIZAÇÃO DE NOMES
+# ============================================
+
+# Valida e sanitiza nome de projeto
+# Retorna 0 se válido, 1 se inválido (com mensagem de erro)
+_projeto_sanitizar_nome() {
+    local nome="$1"
+
+    if [ -z "$nome" ]; then
+        echo -e "${RED}Erro: Nome do projeto não pode ser vazio${NC}"
+        return 1
+    fi
+
+    # Bloquear path traversal
+    if [[ "$nome" == *".."* ]] || [[ "$nome" == *"/"* ]]; then
+        echo -e "${RED}Erro: Nome do projeto não pode conter '..' ou '/'${NC}"
+        return 1
+    fi
+
+    # Bloquear nomes começando com . ou -
+    if [[ "$nome" == .* ]] || [[ "$nome" == -* ]]; then
+        echo -e "${RED}Erro: Nome do projeto não pode começar com '.' ou '-'${NC}"
+        return 1
+    fi
+
+    # Limitar comprimento
+    if [ ${#nome} -gt $_PROJETO_NOME_MAX ]; then
+        echo -e "${RED}Erro: Nome do projeto não pode ter mais de $_PROJETO_NOME_MAX caracteres${NC}"
+        return 1
+    fi
+
+    # Whitelist: apenas letras, números, ponto, underscore, hífen
+    if [[ ! "$nome" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+        echo -e "${RED}Erro: Nome do projeto contém caracteres inválidos${NC}"
+        echo -e "${YELLOW}Permitido: letras, números, '.', '_', '-'${NC}"
+        return 1
+    fi
+
+    return 0
+}
+
+# Verifica se um path é seguro (está dentro do PROJECTS_ROOT)
+_projeto_verificar_path_seguro() {
+    local path_to_check="$1"
+    local base_dir="$2"
+
+    if [ -z "$path_to_check" ] || [ -z "$base_dir" ]; then
+        return 1
+    fi
+
+    local path_real
+    path_real=$(realpath -m "$path_to_check" 2>/dev/null) || return 1
+    local base_real
+    base_real=$(realpath -m "$base_dir" 2>/dev/null) || return 1
+
+    [[ "$path_real" == "$base_real"* ]]
+}
+
+# ============================================
+# CARREGAMENTO SEGURO DE CONFIGURAÇÃO
+# ============================================
+
+# Valida .projeto-env antes de fazer source
+# Rejeita se contém padrões perigosos
+_projeto_validar_env_file() {
+    local file="$1"
+
+    if [ ! -f "$file" ]; then
+        return 1
+    fi
+
+    # Padrões perigosos que não devem estar em .projeto-env
+    local patterns_perigosos=(
+        'eval '
+        'exec '
+        '\brm\b.*-rf'
+        '\bdd\b '
+        'mkfs\.'
+        '> /dev/'
+        'chmod.*777'
+        'curl.*|.*sh'
+        'wget.*|.*sh'
+        '\bsudo\b'
+        '\bsu\b '
+    )
+
+    for pattern in "${patterns_perigosos[@]}"; do
+        if grep -qE "$pattern" "$file" 2>/dev/null; then
+            return 1
+        fi
+    done
+
+    return 0
+}
+
+# Carrega .projeto-config de forma segura (sem source)
+# Lê apenas variáveis conhecidas com regex
+_projeto_carregar_config() {
+    local file="$1"
+
+    if [ ! -f "$file" ]; then
+        return 1
+    fi
+
+    # Ler apenas variáveis específicas e conhecidas
+    local val
+    val=$(grep -E '^PROJETO_NOME=' "$file" 2>/dev/null | head -1 | sed 's/^PROJETO_NOME=//;s/^"//;s/"$//')
+    [ -n "$val" ] && PROJETO_NOME="$val"
+
+    val=$(grep -E '^PROJETO_TIPO=' "$file" 2>/dev/null | head -1 | sed 's/^PROJETO_TIPO=//;s/^"//;s/"$//')
+    [ -n "$val" ] && PROJETO_TIPO="$val"
+
+    val=$(grep -E '^PROJETO_CRIADO=' "$file" 2>/dev/null | head -1 | sed 's/^PROJETO_CRIADO=//;s/^"//;s/"$//')
+    [ -n "$val" ] && PROJETO_CRIADO="$val"
+
+    val=$(grep -E '^PROJETO_LINGUAGEM=' "$file" 2>/dev/null | head -1 | sed 's/^PROJETO_LINGUAGEM=//;s/^"//;s/"$//')
+    [ -n "$val" ] && PROJETO_LINGUAGEM="$val"
+
+    val=$(grep -E '^PROJETO_IMPORTADO=' "$file" 2>/dev/null | head -1 | sed 's/^PROJETO_IMPORTADO=//;s/^"//;s/"$//')
+    [ -n "$val" ] && PROJETO_IMPORTADO="$val"
+
+    val=$(grep -E '^PROJETO_REPO=' "$file" 2>/dev/null | head -1 | sed 's/^PROJETO_REPO=//;s/^"//;s/"$//')
+    [ -n "$val" ] && PROJETO_REPO="$val"
+
+    return 0
+}
+
+# ============================================
 # PROJETO JAIL - RESTRIÇÃO DE NAVEGAÇÃO
 # ============================================
 
-# Override do comando cd para restringir navegação
-_projeto_cd_jail() {
-    local target="$1"
+# Verificação central: o path está dentro do projeto?
+_projeto_path_dentro_do_projeto() {
+    local path_check="$1"
+    local projeto_real
+    projeto_real=$(realpath -m "$PROJETO_ATUAL_PATH" 2>/dev/null) || return 1
 
+    local check_real
+    check_real=$(realpath -m "$path_check" 2>/dev/null) || return 1
+
+    # Deve ser exatamente o projeto ou subpath dele (com /)
+    [[ "$check_real" == "$projeto_real" || "$check_real" == "$projeto_real/"* ]]
+}
+
+# Override do comando cd para restringir navegação (usando função, não alias)
+_projeto_cd_jail() {
     # Se não estiver em um projeto, cd normal
     if [ -z "$PROJETO_ATUAL_PATH" ]; then
         builtin cd "$@"
         return $?
     fi
+
+    local target="$1"
 
     # Resolver caminho absoluto do destino
     local destino
@@ -72,17 +216,10 @@ _projeto_cd_jail() {
         destino=$(builtin cd -P -- "$target" 2>/dev/null && pwd) || destino="$target"
     fi
 
-    # Verificar se o destino está dentro do projeto
-    local destino_real=$(realpath -m "$destino" 2>/dev/null || echo "$destino")
-    local projeto_real=$(realpath -m "$PROJETO_ATUAL_PATH" 2>/dev/null || echo "$PROJETO_ATUAL_PATH")
-
-    # Comparar caminhos
-    if [[ "$destino_real" == "$projeto_real"* ]]; then
-        # Destino está dentro do projeto - permitir
+    if _projeto_path_dentro_do_projeto "$destino"; then
         builtin cd "$@"
         return $?
     else
-        # Destino está fora do projeto - bloquear
         echo -e "${RED}✗ Não é possível navegar para fora do projeto '$PROJETO_ATUAL'${NC}"
         echo -e "${YELLOW}Caminho bloqueado: $target${NC}"
         echo -e "${YELLOW}Use 'projeto sair' para sair do projeto${NC}"
@@ -90,25 +227,440 @@ _projeto_cd_jail() {
     fi
 }
 
+# Override de pushd para jail
+_projeto_pushd_jail() {
+    if [ -z "$PROJETO_ATUAL_PATH" ]; then
+        builtin pushd "$@"
+        return $?
+    fi
+
+    local target="$1"
+    local destino
+    if [ -z "$target" ]; then
+        builtin pushd
+        return $?
+    fi
+    destino=$(builtin cd -P -- "$target" 2>/dev/null && pwd) || destino="$target"
+
+    if _projeto_path_dentro_do_projeto "$destino"; then
+        builtin pushd "$@"
+        return $?
+    else
+        echo -e "${RED}✗ pushd bloqueado: fora do projeto '$PROJETO_ATUAL'${NC}"
+        echo -e "${YELLOW}Use 'projeto sair' para sair do projeto${NC}"
+        return 1
+    fi
+}
+
+# Override de popd para jail
+_projeto_popd_jail() {
+    if [ -z "$PROJETO_ATUAL_PATH" ]; then
+        builtin popd "$@"
+        return $?
+    fi
+
+    # Simular popd para verificar destino
+    local destino
+    destino=$(builtin popd -n "$@" 2>/dev/null && pwd) || destino=""
+
+    if [ -z "$destino" ] || _projeto_path_dentro_do_projeto "$destino"; then
+        builtin popd "$@"
+        return $?
+    else
+        echo -e "${RED}✗ popd bloqueado: destino fora do projeto '$PROJETO_ATUAL'${NC}"
+        return 1
+    fi
+}
+
+# Override de exec para bloquear novas shells dentro do jail
+_projeto_exec_jail() {
+    if [ -z "$PROJETO_ATUAL_PATH" ]; then
+        builtin exec "$@"
+        return $?
+    fi
+
+    # Bloquear exec de shells que eliminariam o jail
+    local cmd="$1"
+    local cmd_base
+    cmd_base=$(basename "$cmd" 2>/dev/null)
+    case "$cmd_base" in
+        bash|sh|zsh|dash|ksh|fish|csh|tcsh)
+            echo -e "${RED}✗ exec de shell bloqueado dentro do jail${NC}"
+            echo -e "${YELLOW}Use 'projeto sair' para sair do projeto${NC}"
+            return 1
+            ;;
+        *)
+            builtin exec "$@"
+            ;;
+    esac
+}
+
+# Wrappers de proteção de acesso a arquivos fora do projeto
+_projeto_verificar_args_path() {
+    # Verifica se algum argumento de path está fora do projeto
+    # Retorna 0 se todos ok, 1 se algum está fora
+    local projeto_real
+    projeto_real=$(realpath -m "$PROJETO_ATUAL_PATH" 2>/dev/null) || return 1
+
+    for arg in "$@"; do
+        # Ignorar flags (começam com -)
+        [[ "$arg" == -* ]] && continue
+        # Ignorar argumentos vazios
+        [ -z "$arg" ] && continue
+
+        # Resolver path (relativo ao PWD)
+        local arg_real
+        if [[ "$arg" == /* ]]; then
+            arg_real=$(realpath -m "$arg" 2>/dev/null) || continue
+        else
+            arg_real=$(realpath -m "$PWD/$arg" 2>/dev/null) || continue
+        fi
+
+        if [[ "$arg_real" != "$projeto_real" && "$arg_real" != "$projeto_real/"* ]]; then
+            echo -e "${RED}✗ Acesso bloqueado: $arg (fora do projeto)${NC}"
+            return 1
+        fi
+    done
+    return 0
+}
+
+# Wrapper genérico para comandos de arquivo
+_projeto_file_cmd_wrapper() {
+    local real_cmd="$1"
+    shift
+
+    if [ -z "$PROJETO_ATUAL_PATH" ]; then
+        command "$real_cmd" "$@"
+        return $?
+    fi
+
+    if _projeto_verificar_args_path "$@"; then
+        command "$real_cmd" "$@"
+        return $?
+    else
+        echo -e "${YELLOW}Use 'projeto sair' para acessar arquivos fora do projeto${NC}"
+        return 1
+    fi
+}
+
+# Wrapper específico para ln que bloqueia symlinks para fora
+_projeto_ln_jail() {
+    if [ -z "$PROJETO_ATUAL_PATH" ]; then
+        command ln "$@"
+        return $?
+    fi
+
+    # Verificar paths de destino e também targets de symlinks
+    local args=("$@")
+    local has_s=0
+    for arg in "${args[@]}"; do
+        [[ "$arg" == *s* && "$arg" == -* ]] && has_s=1
+    done
+
+    if [ $has_s -eq 1 ]; then
+        # Para symlinks, verificar que o target está dentro do projeto
+        local target=""
+        local skip_next=0
+        for arg in "${args[@]}"; do
+            if [ $skip_next -eq 1 ]; then
+                skip_next=0
+                continue
+            fi
+            [[ "$arg" == -* ]] && continue
+            if [ -z "$target" ]; then
+                target="$arg"
+            fi
+        done
+
+        if [ -n "$target" ]; then
+            local target_real
+            if [[ "$target" == /* ]]; then
+                target_real=$(realpath -m "$target" 2>/dev/null)
+            else
+                target_real=$(realpath -m "$PWD/$target" 2>/dev/null)
+            fi
+
+            local projeto_real
+            projeto_real=$(realpath -m "$PROJETO_ATUAL_PATH" 2>/dev/null)
+
+            if [[ "$target_real" != "$projeto_real" && "$target_real" != "$projeto_real/"* ]]; then
+                echo -e "${RED}✗ Symlink bloqueado: target '$target' está fora do projeto${NC}"
+                return 1
+            fi
+        fi
+    fi
+
+    if _projeto_verificar_args_path "$@"; then
+        command ln "$@"
+        return $?
+    else
+        echo -e "${YELLOW}Use 'projeto sair' para acessar arquivos fora do projeto${NC}"
+        return 1
+    fi
+}
+
+# Trap DEBUG: verifica $PWD após cada comando e força volta se escapou
+_projeto_debug_trap() {
+    if [ -n "$PROJETO_ATUAL_PATH" ] && [ -n "$PROJETO_JAIL_ATIVO" ]; then
+        if ! _projeto_path_dentro_do_projeto "$PWD"; then
+            echo -e "${RED}✗ Detectada saída do projeto. Retornando...${NC}"
+            builtin cd "$PROJETO_ATUAL_PATH"
+        fi
+    fi
+}
+
+# Lista de comandos que recebem wrappers no jail
+_PROJETO_JAIL_CMDS=(cat less more head tail vim nano vi cp mv ln rm)
+
 # Ativar/desativar jail
 _projeto_ativar_jail() {
+    # Bloquear CDPATH
+    export CDPATH=""
+
     if [ -n "$BASH_VERSION" ]; then
-        # Bash: usar alias
-        alias cd='_projeto_cd_jail'
-    elif [ -n "$ZSH_VERSION" ]; then
-        # Zsh: criar função que sobrescreve cd
+        # Bash: usar funções (não aliases, que são bypassáveis com \cmd)
         cd() { _projeto_cd_jail "$@"; }
+        pushd() { _projeto_pushd_jail "$@"; }
+        popd() { _projeto_popd_jail "$@"; }
+        exec() { _projeto_exec_jail "$@"; }
+
+        # Wrappers de acesso a arquivos
+        cat() { _projeto_file_cmd_wrapper cat "$@"; }
+        less() { _projeto_file_cmd_wrapper less "$@"; }
+        more() { _projeto_file_cmd_wrapper more "$@"; }
+        head() { _projeto_file_cmd_wrapper head "$@"; }
+        tail() { _projeto_file_cmd_wrapper tail "$@"; }
+        vim() { _projeto_file_cmd_wrapper vim "$@"; }
+        nano() { _projeto_file_cmd_wrapper nano "$@"; }
+        vi() { _projeto_file_cmd_wrapper vi "$@"; }
+        cp() { _projeto_file_cmd_wrapper cp "$@"; }
+        mv() { _projeto_file_cmd_wrapper mv "$@"; }
+        ln() { _projeto_ln_jail "$@"; }
+
+        # Ativar trap DEBUG para detectar escapes via subshell/command cd/builtin cd
+        trap '_projeto_debug_trap' DEBUG
+
+    elif [ -n "$ZSH_VERSION" ]; then
+        cd() { _projeto_cd_jail "$@"; }
+        pushd() { _projeto_pushd_jail "$@"; }
+        popd() { _projeto_popd_jail "$@"; }
+        exec() { _projeto_exec_jail "$@"; }
+        cat() { _projeto_file_cmd_wrapper cat "$@"; }
+        less() { _projeto_file_cmd_wrapper less "$@"; }
+        more() { _projeto_file_cmd_wrapper more "$@"; }
+        head() { _projeto_file_cmd_wrapper head "$@"; }
+        tail() { _projeto_file_cmd_wrapper tail "$@"; }
+        vim() { _projeto_file_cmd_wrapper vim "$@"; }
+        nano() { _projeto_file_cmd_wrapper nano "$@"; }
+        vi() { _projeto_file_cmd_wrapper vi "$@"; }
+        cp() { _projeto_file_cmd_wrapper cp "$@"; }
+        mv() { _projeto_file_cmd_wrapper mv "$@"; }
+        ln() { _projeto_ln_jail "$@"; }
     fi
+
     export PROJETO_JAIL_ATIVO="1"
 }
 
 _projeto_desativar_jail() {
     if [ -n "$BASH_VERSION" ]; then
-        unalias cd 2>/dev/null
+        # Remover trap DEBUG
+        trap - DEBUG
+
+        # Remover funções que sobrescrevem builtins/comandos
+        unset -f cd 2>/dev/null
+        unset -f pushd 2>/dev/null
+        unset -f popd 2>/dev/null
+        unset -f exec 2>/dev/null
+        unset -f cat 2>/dev/null
+        unset -f less 2>/dev/null
+        unset -f more 2>/dev/null
+        unset -f head 2>/dev/null
+        unset -f tail 2>/dev/null
+        unset -f vim 2>/dev/null
+        unset -f nano 2>/dev/null
+        unset -f vi 2>/dev/null
+        unset -f cp 2>/dev/null
+        unset -f mv 2>/dev/null
+        unset -f ln 2>/dev/null
+
     elif [ -n "$ZSH_VERSION" ]; then
         unfunction cd 2>/dev/null
+        unfunction pushd 2>/dev/null
+        unfunction popd 2>/dev/null
+        unfunction exec 2>/dev/null
+        unfunction cat 2>/dev/null
+        unfunction less 2>/dev/null
+        unfunction more 2>/dev/null
+        unfunction head 2>/dev/null
+        unfunction tail 2>/dev/null
+        unfunction vim 2>/dev/null
+        unfunction nano 2>/dev/null
+        unfunction vi 2>/dev/null
+        unfunction cp 2>/dev/null
+        unfunction mv 2>/dev/null
+        unfunction ln 2>/dev/null
     fi
+
     unset PROJETO_JAIL_ATIVO
+    # Restaurar CDPATH
+    unset CDPATH
+}
+
+# ============================================
+# PERFIL ISOLADO POR PROJETO
+# ============================================
+
+_projeto_ativar_git_identity() {
+    local projeto_dir="$1"
+    local config_file="$projeto_dir/.projeto-config"
+
+    [ -f "$config_file" ] || return 0
+
+    local git_name git_email
+    git_name=$(grep -E '^PROJETO_GIT_NAME=' "$config_file" | head -1 | sed 's/^PROJETO_GIT_NAME=//;s/^"//;s/"$//')
+    git_email=$(grep -E '^PROJETO_GIT_EMAIL=' "$config_file" | head -1 | sed 's/^PROJETO_GIT_EMAIL=//;s/^"//;s/"$//')
+
+    [ -n "$git_name" ] && export GIT_AUTHOR_NAME="$git_name" && export GIT_COMMITTER_NAME="$git_name"
+    [ -n "$git_email" ] && export GIT_AUTHOR_EMAIL="$git_email" && export GIT_COMMITTER_EMAIL="$git_email"
+}
+
+_projeto_ativar_perfil() {
+    local projeto_dir="$PROJETO_ATUAL_PATH"
+    local nome="$PROJETO_ATUAL"
+
+    # Salvar estado original para restauração
+    export _PROJETO_ORIG_PS1="$PS1"
+    export _PROJETO_ORIG_HOME="$HOME"
+    export _PROJETO_ORIG_HISTFILE="$HISTFILE"
+    export _PROJETO_ORIG_PATH="$PATH"
+    export _PROJETO_ORIG_TMPDIR="${TMPDIR:-}"
+    export _PROJETO_ORIG_XDG_CACHE_HOME="${XDG_CACHE_HOME:-}"
+    export _PROJETO_ORIG_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-}"
+    export _PROJETO_ORIG_XDG_DATA_HOME="${XDG_DATA_HOME:-}"
+
+    # PS1 customizado
+    export PS1="\[\033[0;36m\]projeto\[\033[0m\]@\[\033[0;32m\]${nome}\[\033[0m\] \W \$ "
+
+    # HISTFILE isolado
+    export HISTFILE="$projeto_dir/.projeto-history"
+    touch "$HISTFILE"
+    history -r "$HISTFILE" 2>/dev/null
+
+    # HOME temporário
+    export HOME="$projeto_dir"
+
+    # PATH com bin local do projeto
+    mkdir -p "$projeto_dir/bin"
+    export PATH="$projeto_dir/bin:$projeto_dir/node_modules/.bin:$PATH"
+
+    # XDG dirs isolados
+    mkdir -p "$projeto_dir/.local/cache" "$projeto_dir/.local/config" "$projeto_dir/.local/data"
+    export XDG_CACHE_HOME="$projeto_dir/.local/cache"
+    export XDG_CONFIG_HOME="$projeto_dir/.local/config"
+    export XDG_DATA_HOME="$projeto_dir/.local/data"
+
+    # TMPDIR isolado
+    mkdir -p "$projeto_dir/.tmp"
+    export TMPDIR="$projeto_dir/.tmp"
+
+    # Git identity per-project (se configurado)
+    _projeto_ativar_git_identity "$projeto_dir"
+
+    # Carregar aliases/env extras do projeto
+    [ -f "$projeto_dir/.projeto-aliases" ] && source "$projeto_dir/.projeto-aliases" 2>/dev/null
+}
+
+_projeto_desativar_perfil() {
+    # Salvar history do projeto antes de sair
+    [ -n "$HISTFILE" ] && history -w "$HISTFILE" 2>/dev/null
+
+    # Restaurar estado original
+    export PS1="$_PROJETO_ORIG_PS1"
+    export HOME="$_PROJETO_ORIG_HOME"
+    export HISTFILE="$_PROJETO_ORIG_HISTFILE"
+    export PATH="$_PROJETO_ORIG_PATH"
+
+    if [ -n "$_PROJETO_ORIG_TMPDIR" ]; then
+        export TMPDIR="$_PROJETO_ORIG_TMPDIR"
+    else
+        unset TMPDIR
+    fi
+
+    # Restaurar XDG
+    if [ -n "$_PROJETO_ORIG_XDG_CACHE_HOME" ]; then
+        export XDG_CACHE_HOME="$_PROJETO_ORIG_XDG_CACHE_HOME"
+    else
+        unset XDG_CACHE_HOME
+    fi
+    if [ -n "$_PROJETO_ORIG_XDG_CONFIG_HOME" ]; then
+        export XDG_CONFIG_HOME="$_PROJETO_ORIG_XDG_CONFIG_HOME"
+    else
+        unset XDG_CONFIG_HOME
+    fi
+    if [ -n "$_PROJETO_ORIG_XDG_DATA_HOME" ]; then
+        export XDG_DATA_HOME="$_PROJETO_ORIG_XDG_DATA_HOME"
+    else
+        unset XDG_DATA_HOME
+    fi
+
+    # Carregar history original
+    [ -n "$HISTFILE" ] && history -r "$HISTFILE" 2>/dev/null
+
+    # Remover git identity do projeto
+    unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+
+    # Limpar variáveis de backup
+    unset _PROJETO_ORIG_PS1 _PROJETO_ORIG_HOME _PROJETO_ORIG_HISTFILE
+    unset _PROJETO_ORIG_PATH _PROJETO_ORIG_TMPDIR
+    unset _PROJETO_ORIG_XDG_CACHE_HOME _PROJETO_ORIG_XDG_CONFIG_HOME _PROJETO_ORIG_XDG_DATA_HOME
+}
+
+_projeto_perfil() {
+    local projeto_dir="$PROJETO_ATUAL_PATH"
+    if [ -z "$projeto_dir" ]; then
+        echo -e "${RED}Erro: entre em um projeto primeiro${NC}"
+        return 1
+    fi
+
+    local config_file="$projeto_dir/.projeto-config"
+
+    echo -e "${BLUE}Configurar perfil do projeto: $PROJETO_ATUAL${NC}"
+    echo ""
+
+    # Ler valores atuais
+    local current_name="" current_email=""
+    if [ -f "$config_file" ]; then
+        current_name=$(grep -E '^PROJETO_GIT_NAME=' "$config_file" | head -1 | sed 's/^PROJETO_GIT_NAME=//;s/^"//;s/"$//')
+        current_email=$(grep -E '^PROJETO_GIT_EMAIL=' "$config_file" | head -1 | sed 's/^PROJETO_GIT_EMAIL=//;s/^"//;s/"$//')
+    fi
+
+    read -p "Git user.name [${current_name:-não configurado}]: " git_name
+    read -p "Git user.email [${current_email:-não configurado}]: " git_email
+
+    # Usar valor atual se vazio
+    git_name="${git_name:-$current_name}"
+    git_email="${git_email:-$current_email}"
+
+    # Atualizar config file
+    if [ -f "$config_file" ]; then
+        # Remover linhas existentes de git
+        local tmp_file="$config_file.tmp"
+        grep -v -E '^PROJETO_GIT_(NAME|EMAIL)=' "$config_file" > "$tmp_file" 2>/dev/null || true
+        mv "$tmp_file" "$config_file"
+    fi
+
+    # Adicionar novas linhas
+    [ -n "$git_name" ] && echo "PROJETO_GIT_NAME=\"$git_name\"" >> "$config_file"
+    [ -n "$git_email" ] && echo "PROJETO_GIT_EMAIL=\"$git_email\"" >> "$config_file"
+
+    # Aplicar imediatamente
+    [ -n "$git_name" ] && export GIT_AUTHOR_NAME="$git_name" && export GIT_COMMITTER_NAME="$git_name"
+    [ -n "$git_email" ] && export GIT_AUTHOR_EMAIL="$git_email" && export GIT_COMMITTER_EMAIL="$git_email"
+
+    echo ""
+    echo -e "${GREEN}Perfil atualizado!${NC}"
+    [ -n "$git_name" ] && echo -e "  Git name:  ${CYAN}$git_name${NC}"
+    [ -n "$git_email" ] && echo -e "  Git email: ${CYAN}$git_email${NC}"
 }
 
 # ============================================
@@ -162,6 +714,9 @@ projeto() {
         info)
             _projeto_info "$nome"
             ;;
+        perfil|profile)
+            _projeto_perfil
+            ;;
         help|ajuda|--help|-h|"")
             _projeto_help
             ;;
@@ -184,6 +739,11 @@ _projeto_criar() {
     if [ -z "$nome" ]; then
         echo -e "${RED}Erro: Nome do projeto não especificado${NC}"
         echo "Uso: projeto criar --nome-do-projeto [tipo]"
+        return 1
+    fi
+
+    # Validar nome do projeto
+    if ! _projeto_sanitizar_nome "$nome"; then
         return 1
     fi
 
@@ -272,6 +832,11 @@ build/
 *.egg-info/
 __pycache__/
 *.pyc
+
+# Perfil do projeto
+.projeto-history
+.tmp/
+.local/
 EOF
 
     # Criar configuração do projeto
@@ -282,6 +847,10 @@ PROJETO_TIPO="$tipo"
 PROJETO_CRIADO="$(date +"%Y-%m-%d %H:%M:%S")"
 PROJETO_LINGUAGEM=""
 PROJETO_VENV=""
+
+# Git identity (configurar com: projeto perfil)
+PROJETO_GIT_NAME=""
+PROJETO_GIT_EMAIL=""
 EOF
 
     # Criar script de ambiente
@@ -310,9 +879,9 @@ fi
 echo -e "\033[0;32mAmbiente do projeto NOME_PLACEHOLDER ativado\033[0m"
 ENVEOF
 
-    # Substituir placeholders
-    sed -i "s|NOME_PLACEHOLDER|$nome|g" "$projeto_dir/.projeto-env"
-    sed -i "s|DIR_PLACEHOLDER|$projeto_dir|g" "$projeto_dir/.projeto-env"
+    # Substituir placeholders (nome já sanitizado, seguro para sed)
+    sed -i "s@NOME_PLACEHOLDER@${nome}@g" "$projeto_dir/.projeto-env"
+    sed -i "s@DIR_PLACEHOLDER@${projeto_dir}@g" "$projeto_dir/.projeto-env"
     chmod +x "$projeto_dir/.projeto-env"
 
     # Inicializar git
@@ -344,6 +913,12 @@ _projeto_entrar() {
     if [ -z "$nome" ]; then
         echo -e "${RED}Erro: Nome do projeto não especificado${NC}"
         echo "Uso: projeto --nome-do-projeto"
+        return 1
+    fi
+
+    # Bloquear path traversal na busca
+    if [[ "$nome" == *".."* ]] || [[ "$nome" == *"/"* ]]; then
+        echo -e "${RED}Erro: Nome de projeto inválido${NC}"
         return 1
     fi
 
@@ -433,16 +1008,21 @@ _projeto_entrar() {
     # Entrar no projeto (usando builtin para evitar jail durante entrada)
     builtin cd "$projeto_dir"
 
-    # Carregar ambiente se existir
+    # Carregar ambiente se existir (com validação de segurança)
     if [ -f ".projeto-env" ]; then
-        source .projeto-env
+        if _projeto_validar_env_file ".projeto-env"; then
+            source .projeto-env
+        else
+            echo -e "${YELLOW}⚠ .projeto-env contém comandos potencialmente perigosos, ignorado${NC}"
+            echo -e "${GREEN}Entrou no projeto: $nome_encontrado${NC}"
+        fi
     else
         echo -e "${GREEN}Entrou no projeto: $nome_encontrado${NC}"
     fi
 
-    # Mostrar informações
+    # Mostrar informações (leitura segura de config, sem source)
     if [ -f ".projeto-config" ]; then
-        source .projeto-config
+        _projeto_carregar_config ".projeto-config"
         echo -e "${BLUE}Tipo: $PROJETO_TIPO | Criado: $PROJETO_CRIADO${NC}"
     fi
 
@@ -454,6 +1034,10 @@ _projeto_entrar() {
 
     # Ativar jail para restringir navegação
     _projeto_ativar_jail
+
+    # Ativar perfil isolado
+    _projeto_ativar_perfil
+
     echo -e "${CYAN}🔒 Navegação restrita ao projeto (use 'projeto sair' para sair)${NC}"
 }
 
@@ -469,7 +1053,13 @@ _projeto_sair() {
 
     local projeto_anterior="$PROJETO_ATUAL"
 
-    # Desativar jail primeiro (antes de cd)
+    # Guardar HOME original antes de desativar perfil (HOME foi alterado pelo perfil)
+    local home_original="${_PROJETO_ORIG_HOME:-$HOME}"
+
+    # Desativar perfil isolado (restaura HOME, PS1, PATH, etc.)
+    _projeto_desativar_perfil
+
+    # Desativar jail (antes de cd)
     _projeto_desativar_jail
 
     # Desativar ambiente virtual Python se estiver ativo
@@ -482,9 +1072,14 @@ _projeto_sair() {
     unset PROJETO_ATUAL_PATH
     unset PROJETO_NOME
     unset PROJETO_ROOT
+    unset PROJETO_TIPO
+    unset PROJETO_CRIADO
+    unset PROJETO_LINGUAGEM
+    unset PROJETO_IMPORTADO
+    unset PROJETO_REPO
 
-    # Voltar para home (agora sem restrições)
-    builtin cd "$HOME"
+    # Voltar para home (agora sem restrições, usando HOME já restaurado)
+    builtin cd "$home_original"
 
     echo -e "${GREEN}✓ Saiu do projeto: $projeto_anterior${NC}"
     echo -e "${CYAN}🔓 Navegação livre restaurada${NC}"
@@ -568,7 +1163,7 @@ _projeto_mover() {
 
     # Atualizar config
     if [ -f "$destino_dir/$nome/.projeto-config" ]; then
-        sed -i "s/PROJETO_TIPO=.*/PROJETO_TIPO=\"$destino\"/" "$destino_dir/$nome/.projeto-config"
+        sed -i "s@PROJETO_TIPO=.*@PROJETO_TIPO=\"$destino\"@" "$destino_dir/$nome/.projeto-config"
     fi
 
     echo -e "${GREEN}✓ Projeto movido para $destino${NC}"
@@ -611,6 +1206,22 @@ _projeto_remover() {
         projeto_dir="$ARCHIVED_DIR/$nome"
     else
         echo -e "${RED}Projeto não encontrado: $nome${NC}"
+        return 1
+    fi
+
+    # Validar que o path é seguro antes de deletar
+    if [ -z "$projeto_dir" ]; then
+        echo -e "${RED}Erro interno: caminho do projeto vazio${NC}"
+        return 1
+    fi
+
+    local projeto_dir_real
+    projeto_dir_real=$(realpath -m "$projeto_dir" 2>/dev/null)
+    local projects_root_real
+    projects_root_real=$(realpath -m "$PROJECTS_ROOT" 2>/dev/null)
+
+    if [[ "$projeto_dir_real" != "$projects_root_real/"* ]]; then
+        echo -e "${RED}Erro: caminho do projeto está fora de PROJECTS_ROOT - operação bloqueada${NC}"
         return 1
     fi
 
@@ -676,8 +1287,7 @@ _projeto_info() {
 
     if [ -d "$projeto_dir/.git" ]; then
         echo -e "\n${GREEN}=== Git ===${NC}"
-        cd "$projeto_dir"
-        git log --oneline -5 2>/dev/null || echo "Sem commits"
+        git -C "$projeto_dir" log --oneline -5 2>/dev/null || echo "Sem commits"
     fi
 }
 
@@ -697,6 +1307,15 @@ _projeto_importar() {
 
     # Extrair nome do repo
     local repo_name=$(basename "$repo_url" .git)
+
+    # Validar nome extraído
+    if ! _projeto_sanitizar_nome "$repo_name"; then
+        echo -e "${YELLOW}Nome extraído do URL é inválido: $repo_name${NC}"
+        read -p "Informe um nome válido para o projeto: " repo_name
+        if ! _projeto_sanitizar_nome "$repo_name"; then
+            return 1
+        fi
+    fi
 
     # Perguntar onde salvar
     echo -e "${BLUE}Onde salvar o projeto?${NC}"
@@ -745,6 +1364,18 @@ PROJETO_REPO="$repo_url"
 EOF
 
     # Criar script de ambiente se não existir
+    # Se o repo clonado já traz um .projeto-env, avisar o usuário
+    if [ -f "$projeto_dir/.projeto-env" ]; then
+        echo -e "${YELLOW}⚠ O repositório clonado contém um .projeto-env${NC}"
+        if ! _projeto_validar_env_file "$projeto_dir/.projeto-env"; then
+            echo -e "${RED}⚠ O arquivo .projeto-env contém comandos potencialmente perigosos!${NC}"
+            read -p "Deseja usar o .projeto-env do repositório? (s/N): " usar_env
+            if [[ ! "$usar_env" =~ ^[Ss]$ ]]; then
+                echo -e "${BLUE}Substituindo por .projeto-env seguro${NC}"
+                rm -f "$projeto_dir/.projeto-env"
+            fi
+        fi
+    fi
     if [ ! -f "$projeto_dir/.projeto-env" ]; then
         cat > "$projeto_dir/.projeto-env" <<ENVEOF
 #!/bin/bash
@@ -814,6 +1445,7 @@ ${BLUE}Uso:${NC}
   projeto arquivar --${YELLOW}nome${NC}           Arquivar projeto
   projeto remover --${YELLOW}nome${NC}            Remover projeto (cuidado!)
   projeto info --${YELLOW}nome${NC}               Ver informações do projeto
+  projeto perfil                      Configurar perfil (git identity)
   projeto help                        Mostrar esta ajuda
 
 ${BLUE}Exemplos:${NC}
