@@ -1299,10 +1299,56 @@ _projeto_importar() {
     local repo_url="$1"
 
     if [ -z "$repo_url" ]; then
-        echo -e "${RED}Erro: URL do repositório não especificada${NC}"
-        echo "Uso: projeto importar <url-do-repo>"
-        echo "Exemplo: projeto importar https://github.com/usuario/repo"
-        return 1
+        # Verificar se gh está autenticado
+        if ! command -v gh &>/dev/null; then
+            echo -e "${RED}Erro: gh CLI não está instalado${NC}"
+            echo "Instale com: apt install gh"
+            return 1
+        fi
+        if ! gh auth status &>/dev/null; then
+            echo -e "${RED}Erro: gh CLI não está autenticado${NC}"
+            echo "Execute: gh auth login"
+            return 1
+        fi
+        if ! command -v fzf &>/dev/null; then
+            echo -e "${RED}Erro: fzf não está instalado${NC}"
+            echo "Instale com: apt install fzf"
+            return 1
+        fi
+
+        echo -e "${BLUE}Buscando seus repositórios no GitHub...${NC}"
+        local repos
+        repos=$(gh repo list --limit 100 --json nameWithOwner,description,isPrivate,updatedAt \
+            --template '{{range .}}{{.nameWithOwner}}{{"\t"}}{{if .isPrivate}}[privado]{{else}}[público]{{end}} {{.description}}{{"\n"}}{{end}}' 2>&1)
+
+        if [ $? -ne 0 ] || [ -z "$repos" ]; then
+            echo -e "${RED}Erro ao buscar repositórios ou nenhum repositório encontrado${NC}"
+            return 1
+        fi
+
+        local escolha
+        escolha=$(echo "$repos" | fzf --height 40% --reverse --prompt="Escolha um repositório: " \
+            --header="↑↓ navegar | Enter selecionar | Esc cancelar" \
+            --delimiter='\t' --with-nth=1,2 --tabstop=4 --ansi)
+
+        if [ -z "$escolha" ]; then
+            echo -e "${BLUE}Operação cancelada${NC}"
+            return 0
+        fi
+
+        # Extrair owner/repo (primeira coluna antes do tab)
+        local repo_name_with_owner
+        repo_name_with_owner=$(echo "$escolha" | cut -f1)
+        repo_url="https://github.com/${repo_name_with_owner}.git"
+        echo -e "${GREEN}Selecionado: ${repo_name_with_owner}${NC}"
+    fi
+
+    # Detectar owner/repo para gh repo clone (se veio de URL, extrair)
+    local gh_repo=""
+    if [ -n "$repo_name_with_owner" ]; then
+        gh_repo="$repo_name_with_owner"
+    elif [[ "$repo_url" =~ github\.com[:/]([^/]+/[^/.]+) ]]; then
+        gh_repo="${BASH_REMATCH[1]}"
     fi
 
     # Extrair nome do repo
@@ -1347,10 +1393,17 @@ _projeto_importar() {
 
     echo -e "${GREEN}Clonando repositório...${NC}"
 
-    # Clonar
-    if ! git clone "$repo_url" "$projeto_dir"; then
-        echo -e "${RED}Erro ao clonar repositório${NC}"
-        return 1
+    # Clonar usando gh se disponível e repo GitHub, senão git clone
+    if [ -n "$gh_repo" ] && command -v gh &>/dev/null && gh auth status &>/dev/null; then
+        if ! gh repo clone "$gh_repo" "$projeto_dir"; then
+            echo -e "${RED}Erro ao clonar repositório${NC}"
+            return 1
+        fi
+    else
+        if ! git clone "$repo_url" "$projeto_dir"; then
+            echo -e "${RED}Erro ao clonar repositório${NC}"
+            return 1
+        fi
     fi
 
     # Criar arquivos de configuração do projeto
